@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react';
+import { useMemo } from 'react';
 import { type FiredRule, type ThrottleLabel } from '@/lib/fuzzy-engine';
 
 interface RuleTableProps {
@@ -39,7 +39,7 @@ export function RuleTable({ rules }: RuleTableProps) {
         </span>
       </div>
 
-      <div className="max-h-[320px] overflow-y-auto">
+      <div className="max-h-80 overflow-y-auto">
         <table className="w-full text-[11px] border-collapse">
           <thead className="sticky top-0 bg-neutral-900 z-10">
             <tr>
