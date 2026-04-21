@@ -34,7 +34,7 @@ export function RuleTable({ rules }: RuleTableProps) {
         <span className="text-[10px] text-neutral-500 uppercase tracking-wide">
           Rule Aktif:
         </span>
-        <span className="text-[11px] font-medium text-emerald-400">
+        <span className="text-[10px] font-medium text-emerald-400">
           {activeCount} / {rules.length}
         </span>
       </div>
