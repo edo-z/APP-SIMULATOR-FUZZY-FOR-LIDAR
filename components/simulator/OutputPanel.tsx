@@ -1,43 +1,82 @@
-import { type ThrottleMembership, CENTROIDS, type ThrottleLabel } from '@/lib/fuzzy-engine';
+// components/simulator/OutputPanel.tsx
+import type { OutputFS } from '@/lib/fuzzy-engine';
+import { OUTPUT_KEYS, OUTPUT_LABELS, OUTPUT_CENTROIDS } from '@/lib/fuzzy-engine';
+import MembershipBar from './MembershipBar';
 
 interface OutputPanelProps {
-  fuzzy: ThrottleMembership;
+  vfd: OutputFS;
+  dim: OutputFS;
+  rawVfd: number;
+  rawDim: number;
+  pwmVfd: number;
+  pwmDim: number;
 }
 
-const LABELS: Record<ThrottleLabel, string> = {
-  VL: 'Very Low',
-  L:  'Low',
-  M:  'Medium',
-  H:  'High',
-  VH: 'Very High',
-};
+const OUTPUT_COLORS = [
+  'bg-blue-400',
+  'bg-teal-500',
+  'bg-green-500',
+  'bg-amber-500',
+  'bg-red-500',
+];
 
-export function OutputPanel({ fuzzy }: OutputPanelProps) {
-  const keys = Object.keys(fuzzy) as ThrottleLabel[];
+function OutputSection({
+  label,
+  fs,
+  raw,
+  pwm,
+  accentClass,
+}: {
+  label: string;
+  fs: OutputFS;
+  raw: number;
+  pwm: number;
+  accentClass: string;
+}) {
   return (
-    <div className="space-y-2">
-      {keys.map((k) => {
-        const pct = Math.round(fuzzy[k] * 100);
-        return (
-          <div key={k} className="flex items-center gap-3">
-            <span className="text-[11px] text-neutral-400 w-44 shrink-0">
-              {k} — {LABELS[k]} ({CENTROIDS[k]}%)
-            </span>
-            <div className="flex-1 h-3 bg-neutral-800 rounded-sm overflow-hidden">
-              <div
-                className="h-full rounded-sm transition-all duration-200 bg-sky-500"
-                style={{
-                  width: `${pct}%`,
-                  opacity: 0.35 + fuzzy[k] * 0.65,
-                }}
-              />
-            </div>
-            <span className="text-[11px] text-neutral-500 w-8 text-right">
-              {pct}%
-            </span>
-          </div>
-        );
-      })}
+    <div>
+      <p className="text-[12px] font-medium text-neutral-700 dark:text-neutral-300 mb-3">{label}</p>
+      {OUTPUT_KEYS.map((k, i) => (
+        <MembershipBar
+          key={k}
+          name={`${OUTPUT_LABELS[k]}  (centroid ${OUTPUT_CENTROIDS[k]})`}
+          degree={fs[k]}
+          color={OUTPUT_COLORS[i]}
+        />
+      ))}
+      <div className="flex items-baseline gap-2 mt-3">
+        <span className="text-[11px] text-neutral-400">Centroid:</span>
+        <span className={`text-lg font-medium ${accentClass}`}>{raw.toFixed(1)}</span>
+        <span className="text-[11px] text-neutral-400">→ PWM</span>
+        <span className={`text-lg font-medium ${accentClass}`}>{pwm}</span>
+        <span className="text-[11px] text-neutral-400">/ 255</span>
+      </div>
+    </div>
+  );
+}
+
+export default function OutputPanel({ vfd, dim, rawVfd, rawDim, pwmVfd, pwmDim }: OutputPanelProps) {
+  return (
+    <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl p-5">
+      <p className="text-[11px] font-medium text-neutral-400 tracking-widest uppercase mb-4">
+        Output Fuzzy (Agregasi MAX)
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <OutputSection
+          label="VFD / Kipas"
+          fs={vfd}
+          raw={rawVfd}
+          pwm={pwmVfd}
+          accentClass="text-blue-600 dark:text-blue-400"
+        />
+        <OutputSection
+          label="AC Dimmer / Pemanas"
+          fs={dim}
+          raw={rawDim}
+          pwm={pwmDim}
+          accentClass="text-amber-600 dark:text-amber-400"
+        />
+      </div>
     </div>
   );
 }

@@ -1,124 +1,116 @@
-import { useMemo } from 'react';
-import { type FiredRule, type ThrottleLabel } from '@/lib/fuzzy-engine';
+// components/simulator/RuleTable.tsx
+import type { RuleWeight, AgeKey } from '@/lib/fuzzy-engine';
+import { AGE_KEYS, ES_KEYS_ORDERED, EK_KEYS_ORDERED } from '@/lib/fuzzy-engine';
 
 interface RuleTableProps {
-  rules: FiredRule[];
+  ruleWeights: RuleWeight[];
 }
 
-const BADGE_STYLE: Record<ThrottleLabel, string> = {
-  VL: 'bg-sky-950 text-sky-300 border-sky-800',
-  L:  'bg-emerald-950 text-emerald-300 border-emerald-800',
-  M:  'bg-neutral-800 text-neutral-300 border-neutral-600',
-  H:  'bg-amber-950 text-amber-300 border-amber-800',
-  VH: 'bg-red-950 text-red-300 border-red-800',
-};
-
-export function RuleTable({ rules }: RuleTableProps) {
-  // Urutkan: rule aktif di atas (diurutkan berdasarkan bobot tertinggi), lalu rule tidak aktif
-  const sortedRules = useMemo(() => {
-    const active = rules
-      .filter(r => r.active)
-      .sort((a, b) => b.weight - a.weight); // bobot tertinggi di atas
-
-    const inactive = rules.filter(r => !r.active);
-
-    return [...active, ...inactive];
-  }, [rules]);
-
-  const activeCount = sortedRules.filter(r => r.active).length;
+export default function RuleTable({ ruleWeights }: RuleTableProps) {
+  // Build lookup map: "esKey|ekKey" → RuleWeight
+  const lookup = new Map<string, RuleWeight>();
+  for (const r of ruleWeights) {
+    lookup.set(`${r.esKey}|${r.ekKey}`, r);
+  }
 
   return (
-    <div className="border border-neutral-800 rounded-lg overflow-hidden">
-      {/* Summary badge */}
-      <div className="px-3 py-2 bg-neutral-900 border-b border-neutral-800 flex items-center gap-2">
-        <span className="text-[10px] text-neutral-500 uppercase tracking-wide">
-          Rule Aktif:
+    <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl p-5">
+      <p className="text-[11px] font-medium text-neutral-400 tracking-widest uppercase mb-3">
+        Rule Base
+      </p>
+
+      {/* Legend */}
+      <div className="flex gap-4 mb-3 text-[10px] text-neutral-400">
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-sm bg-blue-100 dark:bg-blue-900/40" />
+          VFD aktif
         </span>
-        <span className="text-[10px] font-medium text-emerald-400">
-          {activeCount} / {rules.length}
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-sm bg-amber-100 dark:bg-amber-900/40" />
+          Dimmer aktif
         </span>
+        <span className="text-neutral-300 dark:text-neutral-600">nilai = bobot AND (e_s × e_k)</span>
       </div>
 
-      <div className="max-h-80 overflow-y-auto">
-        <table className="w-full text-[11px] border-collapse">
-          <thead className="sticky top-0 bg-neutral-900 z-10">
+      <div className="overflow-x-auto">
+        <table className="text-[10px] w-full border-collapse">
+          <thead>
             <tr>
-              {['No', 'LIDAR', 'Kemiringan', 'Err Kec', 'Bobot', 'Throttle'].map((h) => (
+              <th className="text-neutral-400 font-medium text-left py-1 pr-2 min-w-[56px]">
+                e_s \ e_k
+              </th>
+              {EK_KEYS_ORDERED.map((ek) => (
                 <th
-                  key={h}
-                  className="px-3 py-2 text-center text-neutral-500 font-medium border-b border-neutral-800"
+                  key={ek}
+                  className="text-neutral-500 dark:text-neutral-400 font-medium text-center py-1 px-1 min-w-[90px]"
                 >
-                  {h}
+                  {ek}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {sortedRules.map((rule, i) => (
-              <RuleRow key={i} index={i + 1} rule={rule} isActive={rule.active} />
+            {ES_KEYS_ORDERED.map((es) => (
+              <tr key={es}>
+                <td className="text-neutral-500 dark:text-neutral-400 font-medium py-1 pr-2">
+                  {es}
+                </td>
+                {EK_KEYS_ORDERED.map((ek) => {
+                  const rule = lookup.get(`${es}|${ek}`);
+                  const w = rule?.w ?? 0;
+                  const isActive = w > 0.001;
+
+                  // Check per-age contribution
+                  const vfdActive = isActive && AGE_KEYS.some((_, i) => (rule?.ageWeights[i] ?? 0) > 0.001);
+                  const dimActive = vfdActive;
+
+                  return (
+                    <td key={ek} className="px-1 py-0.5">
+                      <div
+                        className={`rounded px-1 py-0.5 text-center transition-colors ${
+                          vfdActive
+                            ? 'bg-blue-50 dark:bg-blue-900/30 ring-1 ring-blue-200 dark:ring-blue-800'
+                            : 'bg-neutral-50 dark:bg-neutral-800'
+                        }`}
+                      >
+                        {/* VFD output code */}
+                        <div
+                          className={`text-[10px] font-medium ${
+                            vfdActive
+                              ? 'text-blue-700 dark:text-blue-300'
+                              : 'text-neutral-400'
+                          }`}
+                        >
+                          V: {rule?.vCodes[0] ?? '—'}
+                        </div>
+                        {/* Dimmer output code */}
+                        <div
+                          className={`text-[10px] font-medium ${
+                            dimActive
+                              ? 'text-amber-700 dark:text-amber-300'
+                              : 'text-neutral-400'
+                          }`}
+                        >
+                          D: {rule?.dCodes[0] ?? '—'}
+                        </div>
+                        {/* Weight */}
+                        <div className="text-[9px] text-neutral-400 mt-0.5">
+                          {w.toFixed(2)}
+                        </div>
+                      </div>
+                    </td>
+                  );
+                })}
+              </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      <p className="text-[10px] text-neutral-400 mt-3">
+        S=SR · R=Rendah · N=Normal · T=Tinggi · X=ST &nbsp;|&nbsp;
+        Output ditampilkan untuk himpunan umur BA (semua umur menghasilkan kode yang sama di rule ini)
+      </p>
     </div>
-  );
-}
-
-// Komponen terpisah untuk setiap baris agar lebih clean
-interface RuleRowProps {
-  index: number;
-  rule: FiredRule;
-  isActive: boolean;
-}
-
-function RuleRow({ index, rule, isActive }: RuleRowProps) {
-  return (
-    <tr
-      className={[
-        'border-b border-neutral-800/50 transition-all duration-200',
-        isActive
-          ? 'bg-emerald-950/30 text-neutral-100'
-          : 'text-neutral-600',
-      ].join(' ')}
-    >
-      <td className="px-3 py-1.5 text-center">
-        {isActive ? (
-          <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px]">
-            {index}
-          </span>
-        ) : (
-          <span className="text-neutral-600">{index}</span>
-        )}
-      </td>
-      <td className="px-3 py-1.5 text-center">
-        <span className={isActive ? 'text-neutral-100' : ''}>{rule.lidar}</span>
-      </td>
-      <td className="px-3 py-1.5 text-center">
-        <span className={isActive ? 'text-neutral-100' : ''}>{rule.slope}</span>
-      </td>
-      <td className="px-3 py-1.5 text-center">
-        <span className={isActive ? 'text-neutral-100' : ''}>{rule.ev}</span>
-      </td>
-      <td className="px-3 py-1.5 text-center">
-        {isActive ? (
-          <span className="text-emerald-400 font-medium">
-            {(rule.weight * 100).toFixed(0)}%
-          </span>
-        ) : (
-          '—'
-        )}
-      </td>
-      <td className="px-3 py-1.5 text-center">
-        <span
-          className={[
-            'inline-block px-1.5 py-0.5 rounded border text-[10px] font-medium',
-            BADGE_STYLE[rule.output],
-            isActive ? 'ring-1 ring-emerald-500/50' : '',
-          ].join(' ')}
-        >
-          {rule.output}
-        </span>
-      </td>
-    </tr>
   );
 }

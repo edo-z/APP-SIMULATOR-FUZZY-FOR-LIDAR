@@ -1,23 +1,29 @@
+// components/simulator/MetricCard.tsx
 interface MetricCardProps {
   label: string;
-  value: number | string;
-  sub: string;
-  pct: number;
-  barColor: string;
+  value: number;
+  unit: string;
+  /** Opsional: warna aksen (Tailwind class) */
+  accent?: 'blue' | 'amber' | 'teal' | 'coral';
 }
 
-export function MetricCard({ label, value, sub, pct, barColor }: MetricCardProps) {
+const accentMap = {
+  blue:  'text-blue-600 dark:text-blue-400',
+  amber: 'text-amber-600 dark:text-amber-400',
+  teal:  'text-teal-600 dark:text-teal-400',
+  coral: 'text-orange-600 dark:text-orange-400',
+};
+
+export default function MetricCard({ label, value, unit, accent = 'blue' }: MetricCardProps) {
   return (
-    <div className="border border-neutral-800 rounded-lg p-4 bg-neutral-900">
-      <p className="text-[11px] text-neutral-500 mb-1">{label}</p>
-      <p className="text-3xl font-medium tracking-tight">{value}</p>
-      <p className="text-[11px] text-neutral-600 mt-0.5">{sub}</p>
-      <div className="mt-3 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-300 ${barColor}`}
-          style={{ width: `${Math.min(pct, 100)}%` }}
-        />
-      </div>
+    <div className="bg-neutral-100 dark:bg-neutral-800 rounded-lg px-4 py-3 text-center">
+      <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mb-1 tracking-wide uppercase">
+        {label}
+      </p>
+      <p className={`text-2xl font-medium ${accentMap[accent]}`}>
+        {Number.isInteger(value) ? value : value.toFixed(1)}
+      </p>
+      <p className="text-[11px] text-neutral-400 mt-0.5">{unit}</p>
     </div>
   );
 }

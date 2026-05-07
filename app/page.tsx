@@ -1,10 +1,15 @@
-import { FuzzySimulator } from '@/components/simulator/FuzzySimulator';
+// app/page.tsx  (atau app/simulator/page.tsx jika ingin di subroute)
+import FuzzySimulator from '@/components/simulator/FuzzySimulator';
 
 export const metadata = {
-  title: 'Fuzzy Logic Simulator — LIDAR · MPU6050 · Throttle',
-  description: 'Mamdani fuzzy inference system: LIDAR distance, slope (MPU6050), and speed error → throttle PWM output.',
+  title: 'Fuzzy Mamdani — Kandang Ayam Broiler',
+  description: 'Simulator kendali fuzzy VFD kipas dan AC Dimmer pemanas kandang ayam broiler',
 };
 
-export default function SimulatorPage() {
-  return <FuzzySimulator />;
+export default function Home() {
+  return (
+    <main className="min-h-screen bg-neutral-50 dark:bg-neutral-950">
+      <FuzzySimulator />
+    </main>
+  );
 }
