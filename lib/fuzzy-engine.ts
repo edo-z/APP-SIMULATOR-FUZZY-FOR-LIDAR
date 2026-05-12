@@ -2,26 +2,32 @@
 //  fuzzy-engine.ts — Fuzzy Logic Kandang Ayam Broiler
 //  Port dari fuzzy.h (Arduino) ke TypeScript (Next.js)
 //
-//  Input  : age  = umur ayam (hari, 0–50)
-//           e_s  = error suhu       = T_setpoint - T_aktual (°C)
-//                  Range BA  (0–10 hari) : -2.0 .. +2.0
-//                  Range BL–PL (>10 hari): -1.0 .. +1.0
-//           e_k  = error kelembaban = H_setpoint - H_aktual (%, -2.5..+2.5)
+//  Input  : age     = umur ayam (hari, 0–50)
+//           tempAct = suhu aktual (°C)
+//           humAct  = kelembaban aktual (%)
+//
+//  Setpoint per fase (dihitung otomatis di dalam engine):
+//  ┌──────┬───────────────┬────────────┐
+//  │ Fase │  Suhu (°C)    │  RH (%)    │
+//  ├──────┼───────────────┼────────────┤
+//  │ BA   │  31 – 34      │  60 – 65   │
+//  │ BL   │  30 – 31      │  60 – 65   │
+//  │ T    │  28 – 29      │  60 – 65   │
+//  │ PA   │  25 – 27      │  60 – 65   │
+//  │ PL   │  24 – 25      │  60 – 65   │
+//  └──────┴───────────────┴────────────┘
+//  Setpoint = titik tengah range masing-masing fase.
+//  e_s = T_setpoint − T_aktual  (range BA: ±2.0°C, BL–PL: ±1.0°C)
+//  e_k = H_setpoint − H_aktual  (range semua fase: ±2.5%)
 //
 //  Output : vfdScore    = PWM VFD / kipas   (0–255)
 //           dimmerScore = PWM AC Dimmer     (0–255)
-//
-//  Perubahan dari versi sebelumnya:
-//  - fuzzifyTemp dipecah menjadi fuzzifyTempBA (range ±2) dan
-//    fuzzifyTempBL (range ±1), dipilih otomatis oleh infer()
-//  - fuzzifyHum diperbarui ke range ±2.5
-//  - fuzzifyAge: edge case umur=0 ditangani (return BA=1)
-//  - infer(): fase umur dominan menentukan fungsi keanggotaan suhu
 // =============================================================
 
 // -------------------------------------------------------------
 //  TYPES
 // -------------------------------------------------------------
+
 export interface FuzzyResult {
   /** PWM VFD kipas 0–255 */
   vfdScore: number;
@@ -31,8 +37,12 @@ export interface FuzzyResult {
   rawVfd: number;
   /** Centroid Dimmer (0–100 %) sebelum konversi ke PWM */
   rawDim: number;
-  /** Fase umur dominan yang digunakan untuk memilih fungsi keanggotaan suhu */
+  /** Fase umur dominan (penentu setpoint & fungsi keanggotaan suhu) */
   dominantAge: AgeKey;
+  /** Setpoint yang digunakan berdasarkan fase dominan */
+  setpoint: { temp: number; hum: number };
+  /** Error yang dihitung engine: e_s = T_sp − T_aktual, e_k = H_sp − H_aktual */
+  error: { es: number; ek: number };
   /** Derajat keanggotaan input */
   membership: {
     age: AgeFS;
@@ -62,20 +72,20 @@ export interface AgeFS {
 }
 
 export interface TempFS {
-  /** Negatif Besar — suhu jauh LEBIH PANAS dari setpoint */
+  /** Negatif Besar — suhu aktual JAUH LEBIH PANAS dari setpoint */
   NB: number;
-  /** Negatif Kecil — suhu sedikit panas */
+  /** Negatif Kecil — suhu aktual sedikit panas */
   NK: number;
   /** Zero — suhu ideal */
   Z: number;
-  /** Positif Kecil — suhu sedikit dingin */
+  /** Positif Kecil — suhu aktual sedikit dingin */
   PK: number;
-  /** Positif Besar — suhu jauh LEBIH DINGIN dari setpoint */
+  /** Positif Besar — suhu aktual JAUH LEBIH DINGIN dari setpoint */
   PB: number;
 }
 
 export interface HumFS {
-  /** Negatif Besar — kelembaban jauh LEBIH LEMBAP dari setpoint */
+  /** Negatif Besar — kelembaban aktual JAUH LEBIH LEMBAP dari setpoint */
   NB: number;
   /** Negatif Kecil — sedikit lembap */
   NK: number;
@@ -83,7 +93,7 @@ export interface HumFS {
   Z: number;
   /** Positif Kecil — sedikit kering */
   PK: number;
-  /** Positif Besar — jauh LEBIH KERING dari setpoint */
+  /** Positif Besar — kelembaban aktual JAUH LEBIH KERING dari setpoint */
   PB: number;
 }
 
@@ -109,7 +119,7 @@ export type RuleCode  = 'S'  | 'R'  | 'N' | 'T'  | 'X';
 export interface RuleWeight {
   esKey: EsKey;
   ekKey: EkKey;
-  /** Bobot AND (min µ_es × µ_ek) */
+  /** Firing strength AND (min µ_es, µ_ek) */
   w: number;
   /** Bobot akhir per himpunan umur [BA, BL, T, PA, PL] */
   ageWeights: number[];
@@ -120,14 +130,39 @@ export interface RuleWeight {
 }
 
 // -------------------------------------------------------------
-//  BAGIAN 1: FUNGSI KEANGGOTAAN DASAR
+//  BAGIAN 1: SETPOINT PER FASE UMUR
+// -------------------------------------------------------------
+
+/**
+ * Tabel setpoint suhu dan kelembaban per fase umur.
+ * Nilai = titik tengah range masing-masing fase:
+ *   BA  → Suhu (31+34)/2 = 32.5°C,  RH (60+65)/2 = 62.5%
+ *   BL  → Suhu (30+31)/2 = 30.5°C,  RH 62.5%
+ *   T   → Suhu (28+29)/2 = 28.5°C,  RH 62.5%
+ *   PA  → Suhu (25+27)/2 = 26.0°C,  RH 62.5%
+ *   PL  → Suhu (24+25)/2 = 24.5°C,  RH 62.5%
+ */
+export const SETPOINT_TABLE: Record<AgeKey, { temp: number; hum: number }> = {
+  BA: { temp: 32.5, hum: 62.5 },
+  BL: { temp: 30.5, hum: 62.5 },
+  T:  { temp: 28.5, hum: 62.5 },
+  PA: { temp: 26.0, hum: 62.5 },
+  PL: { temp: 24.5, hum: 62.5 },
+};
+
+/** Kembalikan setpoint berdasarkan fase umur dominan (untuk UI). */
+export function getSetpoint(dominantAge: AgeKey): { temp: number; hum: number } {
+  return SETPOINT_TABLE[dominantAge];
+}
+
+// -------------------------------------------------------------
+//  BAGIAN 2: FUNGSI KEANGGOTAAN DASAR
 // -------------------------------------------------------------
 
 /**
  * Trapesium: naik a→b, datar b→c, turun c→d.
- * Nilai tepat di a atau d menghasilkan 0 (batas eksklusif).
- * Khusus untuk batas terbuka (plateau kiri: a===b, plateau kanan: c===d)
- * ditangani dengan clamp.
+ * Plateau kiri  (a === b): return 1 saat x <= b.
+ * Plateau kanan (c === d): return 1 saat x >= c.
  */
 export function fTrap(
   x: number,
@@ -136,11 +171,11 @@ export function fTrap(
   c: number,
   d: number,
 ): number {
-  if (x <= a && a !== b) return 0;          // di bawah batas kiri
-  if (x >= d && c !== d) return 0;          // di atas batas kanan
-  if (x >= b && x <= c)  return 1;          // plateau tengah / full
-  if (x < b && b > a)    return (x - a) / (b - a);  // sisi naik
-  if (x > c && d > c)    return (d - x) / (d - c);  // sisi turun
+  if (x <= a && a !== b) return 0;
+  if (x >= d && c !== d) return 0;
+  if (x >= b && x <= c)  return 1;
+  if (x < b && b > a)    return (x - a) / (b - a);
+  if (x > c && d > c)    return (d - x) / (d - c);
   return 1;
 }
 
@@ -153,27 +188,28 @@ export function fTri(x: number, a: number, b: number, c: number): number {
 }
 
 // -------------------------------------------------------------
-//  BAGIAN 2: FUZZIFIKASI
+//  BAGIAN 3: FUZZIFIKASI
 // -------------------------------------------------------------
 
 /**
  * Fuzzifikasi Umur Ayam (0–50 hari).
- * Edge case umur = 0: BA = 1 (plateau kiri penuh).
+ * Edge case umur = 0  → BA = 1 (plateau kiri).
+ * Edge case umur ≥ 40 → PL = 1 (plateau kanan).
  */
 export function fuzzifyAge(age: number): AgeFS {
   return {
-    BA: fTrap(age,  0,  0,  5, 10),   // plateau kiri: [0,0] → BA=1 saat age≤5
+    BA: fTrap(age,  0,  0,  5, 10),
     BL: fTrap(age,  5, 10, 13, 18),
     T:  fTrap(age, 14, 18, 22, 28),
     PA: fTrap(age, 24, 28, 32, 38),
-    PL: fTrap(age, 35, 40, 50, 50),   // plateau kanan: [50,50] → PL=1 saat age≥40
+    PL: fTrap(age, 35, 40, 50, 50),
   };
 }
 
 /**
- * Fuzzifikasi Error Suhu — FASE BA (Brooding Awal, 0–10 hari).
- * Range: -2.0 °C (sangat panas) hingga +2.0 °C (sangat dingin).
- * e_s = T_setpoint − T_aktual → negatif = aktual lebih panas dari setpoint.
+ * Fuzzifikasi Error Suhu — FASE BA (0–10 hari), range ±2.0°C.
+ * e_s negatif = suhu aktual LEBIH PANAS dari setpoint.
+ * e_s positif = suhu aktual LEBIH DINGIN dari setpoint.
  */
 export function fuzzifyTempBA(es: number): TempFS {
   return {
@@ -186,8 +222,7 @@ export function fuzzifyTempBA(es: number): TempFS {
 }
 
 /**
- * Fuzzifikasi Error Suhu — FASE BL hingga PL (>10 hari).
- * Range: -1.0 °C (sangat panas) hingga +1.0 °C (sangat dingin).
+ * Fuzzifikasi Error Suhu — FASE BL hingga PL (>10 hari), range ±1.0°C.
  */
 export function fuzzifyTempBL(es: number): TempFS {
   return {
@@ -200,9 +235,9 @@ export function fuzzifyTempBL(es: number): TempFS {
 }
 
 /**
- * Fuzzifikasi Error Kelembaban.
- * Range: -2.5 % (sangat lembap) hingga +2.5 % (sangat kering).
- * e_k = H_setpoint − H_aktual → negatif = aktual lebih lembap dari setpoint.
+ * Fuzzifikasi Error Kelembaban (semua fase), range ±2.5%.
+ * e_k negatif = kelembaban aktual LEBIH LEMBAP dari setpoint.
+ * e_k positif = kelembaban aktual LEBIH KERING dari setpoint.
  */
 export function fuzzifyHum(ek: number): HumFS {
   return {
@@ -215,69 +250,52 @@ export function fuzzifyHum(ek: number): HumFS {
 }
 
 // -------------------------------------------------------------
-//  BAGIAN 3: RULE BASE
+//  BAGIAN 4: RULE BASE
 //  25 rules — 5 e_s × 5 e_k
-//  Setiap rule output sama untuk semua himpunan umur [BA,BL,T,PA,PL]
-//  (umur berperan sebagai moderator bobot via AND, bukan mengubah output)
+//  Output sama untuk semua fase umur [BA,BL,T,PA,PL].
+//  Fase umur berperan sebagai MODERATOR BOBOT via AND.
 //
-//  Kode output: S=SR, R=R, N=N, T=T, X=ST
+//  Kode : S=SR  R=R  N=N  T=T  X=ST
 //
-//  Logika umum:
-//  - Dimmer tinggi  → suhu aktual LEBIH PANAS (e_s negatif, NB/NK)
-//  - Dimmer rendah  → suhu aktual LEBIH DINGIN (e_s positif, PK/PB)
-//  - VFD tinggi     → kelembaban LEBIH KERING (e_k positif, PK/PB)
-//                     atau suhu sangat panas (perlu sirkulasi)
-//  - VFD rendah     → kondisi ideal / kelembaban lembap + suhu dingin
+//  Logika:
+//  · Dimmer ↑  saat suhu aktual PANAS  (e_s negatif: NB/NK)
+//  · Dimmer ↓  saat suhu aktual DINGIN (e_s positif: PK/PB)
+//  · VFD ↑     saat RH KERING (e_k positif: PK/PB) / suhu sangat panas
+//  · VFD ↓     saat kondisi ideal / RH lembap + suhu dingin
 // -------------------------------------------------------------
 
 export const AGE_KEYS: AgeKey[] = ['BA', 'BL', 'T', 'PA', 'PL'];
 
 const CHAR_TO_KEY: Record<RuleCode, OutputKey> = {
-  S: 'SR',
-  R: 'R',
-  N: 'N',
-  T: 'T',
-  X: 'ST',
+  S: 'SR', R: 'R', N: 'N', T: 'T', X: 'ST',
 };
 
-/**
- * Rule base: 25 baris [esKey, ekKey, vfd_codes[5], dim_codes[5]]
- * vfd_codes dan dim_codes berlaku untuk [BA, BL, T, PA, PL]
- */
 const RULE_TABLE: [EsKey, EkKey, RuleCode[], RuleCode[]][] = [
-  // ── e_s = NB (Suhu aktual SANGAT PANAS, perlu pendinginan agresif) ──
-  // Dimmer ST (mati/sangat rendah pemanas), VFD sesuai kelembaban
-  ['NB', 'NB', ['N','N','N','N','N'], ['X','X','X','X','X']],  // lembap+panas → VFD N, Dimmer ST
-  ['NB', 'NK', ['R','R','R','R','R'], ['X','X','X','X','X']],  // agak lembap   → VFD R
-  ['NB', 'Z',  ['R','R','R','R','R'], ['X','X','X','X','X']],  // RH ideal      → VFD R
-  ['NB', 'PK', ['N','N','N','N','N'], ['X','X','X','X','X']],  // agak kering   → VFD N
-  ['NB', 'PB', ['T','T','T','T','T'], ['X','X','X','X','X']],  // sangat kering → VFD T
-
-  // ── e_s = NK (Suhu aktual AGAK PANAS) ──
+  // ── e_s = NB (suhu aktual SANGAT PANAS) ──
+  ['NB', 'NB', ['N','N','N','N','N'], ['X','X','X','X','X']],
+  ['NB', 'NK', ['R','R','R','R','R'], ['X','X','X','X','X']],
+  ['NB', 'Z',  ['R','R','R','R','R'], ['X','X','X','X','X']],
+  ['NB', 'PK', ['N','N','N','N','N'], ['X','X','X','X','X']],
+  ['NB', 'PB', ['T','T','T','T','T'], ['X','X','X','X','X']],
+  // ── e_s = NK (suhu aktual AGAK PANAS) ──
   ['NK', 'NB', ['N','N','N','N','N'], ['T','T','T','T','T']],
   ['NK', 'NK', ['R','R','R','R','R'], ['T','T','T','T','T']],
   ['NK', 'Z',  ['R','R','R','R','R'], ['T','T','T','T','T']],
   ['NK', 'PK', ['N','N','N','N','N'], ['T','T','T','T','T']],
   ['NK', 'PB', ['T','T','T','T','T'], ['T','T','T','T','T']],
-
-  // ── e_s = Z (Suhu IDEAL) ──
-  ['Z',  'NB', ['N','N','N','N','N'], ['S','S','S','S','S']],  // lembap → VFD N, Dimmer SR
-  ['Z',  'NK', ['S','S','S','S','S'], ['R','R','R','R','R']],  // agak lembap → VFD SR, Dimmer R
-  ['Z',  'Z',  ['S','S','S','S','S'], ['S','S','S','S','S']],  // semua ideal → minimal
-  ['Z',  'PK', ['T','T','T','T','T'], ['S','S','S','S','S']],  // agak kering → VFD T
-  ['Z',  'PB', ['X','X','X','X','X'], ['S','S','S','S','S']],  // sangat kering → VFD ST
-
-  // ── e_s = PK (Suhu aktual AGAK DINGIN, perlu sedikit pemanasan) ──
+  // ── e_s = Z  (suhu IDEAL) ──
+  ['Z',  'NB', ['N','N','N','N','N'], ['S','S','S','S','S']],
+  ['Z',  'NK', ['S','S','S','S','S'], ['R','R','R','R','R']],
+  ['Z',  'Z',  ['S','S','S','S','S'], ['S','S','S','S','S']],
+  ['Z',  'PK', ['T','T','T','T','T'], ['S','S','S','S','S']],
+  ['Z',  'PB', ['X','X','X','X','X'], ['S','S','S','S','S']],
+  // ── e_s = PK (suhu aktual AGAK DINGIN) ──
   ['PK', 'NB', ['N','N','N','N','N'], ['R','R','R','R','R']],
   ['PK', 'NK', ['T','T','T','T','T'], ['R','R','R','R','R']],
   ['PK', 'Z',  ['T','T','T','T','T'], ['R','R','R','R','R']],
   ['PK', 'PK', ['T','T','T','T','T'], ['R','R','R','R','R']],
   ['PK', 'PB', ['X','X','X','X','X'], ['R','R','R','R','R']],
-
-  // ── e_s = PB (Suhu aktual SANGAT DINGIN, pemanas harus maksimal) ──
-  // Dimmer SR (justru kurangi pemanas agar tidak overheat balik)
-  // → Catatan: PB berarti T_aktual jauh di bawah setpoint,
-  //   pemanas sudah bekerja maksimal, VFD dikurangi agar panas tidak keluar
+  // ── e_s = PB (suhu aktual SANGAT DINGIN) ──
   ['PB', 'NB', ['N','N','N','N','N'], ['S','S','S','S','S']],
   ['PB', 'NK', ['T','T','T','T','T'], ['S','S','S','S','S']],
   ['PB', 'Z',  ['T','T','T','T','T'], ['S','S','S','S','S']],
@@ -286,7 +304,7 @@ const RULE_TABLE: [EsKey, EkKey, RuleCode[], RuleCode[]][] = [
 ];
 
 // -------------------------------------------------------------
-//  BAGIAN 4: INFERENSI (Mamdani — operator AND = min, OR = max)
+//  BAGIAN 5: INFERENSI (AND = min, OR = max)
 // -------------------------------------------------------------
 
 function applyRules(
@@ -299,10 +317,7 @@ function applyRules(
   const ruleWeights: RuleWeight[] = [];
 
   for (const [esKey, ekKey, vCodes, dCodes] of RULE_TABLE) {
-    // Firing strength gabungan e_s dan e_k
-    const w = Math.min(t[esKey], h[ekKey]);
-
-    // Bobot akhir per fase umur (AND dengan derajat keanggotaan umur)
+    const w          = Math.min(t[esKey], h[ekKey]);
     const ageWeights = AGE_KEYS.map((ak) => Math.min(w, a[ak]));
 
     ruleWeights.push({ esKey, ekKey, w, ageWeights, vCodes, dCodes });
@@ -310,15 +325,12 @@ function applyRules(
     if (w < 0.001) continue;
 
     AGE_KEYS.forEach((ak, i) => {
-      const aw = ageWeights[i];
+      const aw   = ageWeights[i];
       if (aw < 0.001) return;
-
       const vKey = CHAR_TO_KEY[vCodes[i]];
       const dKey = CHAR_TO_KEY[dCodes[i]];
-
-      // Agregasi: ambil maksimum (union / OR)
-      vfd[vKey] = Math.max(vfd[vKey], aw);
-      dim[dKey] = Math.max(dim[dKey], aw);
+      vfd[vKey]  = Math.max(vfd[vKey], aw);
+      dim[dKey]  = Math.max(dim[dKey], aw);
     });
   }
 
@@ -326,40 +338,31 @@ function applyRules(
 }
 
 // -------------------------------------------------------------
-//  BAGIAN 5: DEFUZZIFIKASI — Weighted Average
-//  Centroid tiap himpunan output (skala 0–100 %):
-//  SR=10, R=30, N=50, T=70, ST=90
+//  BAGIAN 6: DEFUZZIFIKASI — Weighted Average
+//  Centroid: SR=10, R=30, N=50, T=70, ST=90  (skala 0–100%)
 // -------------------------------------------------------------
 
 export const OUTPUT_CENTROIDS: Record<OutputKey, number> = {
-  SR: 10,
-  R:  30,
-  N:  50,
-  T:  70,
-  ST: 90,
+  SR: 10, R: 30, N: 50, T: 70, ST: 90,
 };
 
 export function defuzzify(fs: OutputFS): number {
   const num =
-    fs.SR * OUTPUT_CENTROIDS.SR +
-    fs.R  * OUTPUT_CENTROIDS.R  +
-    fs.N  * OUTPUT_CENTROIDS.N  +
-    fs.T  * OUTPUT_CENTROIDS.T  +
-    fs.ST * OUTPUT_CENTROIDS.ST;
+    fs.SR * 10 + fs.R * 30 + fs.N * 50 + fs.T * 70 + fs.ST * 90;
   const den = fs.SR + fs.R + fs.N + fs.T + fs.ST;
   return den > 0.001 ? num / den : 0;
 }
 
 // -------------------------------------------------------------
-//  HELPER: Tentukan fase umur DOMINAN (derajat keanggotaan tertinggi)
+//  HELPER: Fase umur dominan
 // -------------------------------------------------------------
 
 function getDominantAge(ageMF: AgeFS): AgeKey {
-  let maxVal = -1;
+  let maxVal   = -1;
   let dominant: AgeKey = 'BA';
   for (const key of AGE_KEYS) {
     if (ageMF[key] > maxVal) {
-      maxVal = ageMF[key];
+      maxVal   = ageMF[key];
       dominant = key as AgeKey;
     }
   }
@@ -373,33 +376,47 @@ function getDominantAge(ageMF: AgeFS): AgeKey {
 /**
  * Hitung output fuzzy Mamdani untuk kandang ayam broiler.
  *
- * @param age  Umur ayam dalam hari (0–50)
- * @param es   Error suhu: T_setpoint − T_aktual
- *             BA  (0–10 hari) : kisaran -2.0 .. +2.0 °C
- *             BL–PL (>10 hari): kisaran -1.0 .. +1.0 °C
- * @param ek   Error kelembaban: H_setpoint − H_aktual (-2.5 .. +2.5 %)
+ * @param age     Umur ayam dalam hari (0–50)
+ * @param tempAct Suhu aktual sensor (°C)
+ * @param humAct  Kelembaban aktual sensor (%)
+ *
+ * Alur internal engine:
+ *  1. Fuzzifikasi umur → tentukan fase dominan
+ *  2. Ambil setpoint dari SETPOINT_TABLE berdasarkan fase dominan
+ *  3. Hitung e_s = T_setpoint − T_aktual
+ *  4. Hitung e_k = H_setpoint − H_aktual
+ *  5. Pilih fungsi keanggotaan suhu (BA: ±2°C / BL–PL: ±1°C)
+ *  6. Fuzzifikasi e_s dan e_k
+ *  7. Inferensi Mamdani (AND=min, OR=max)
+ *  8. Defuzzifikasi weighted average → skala 0–100%
+ *  9. Konversi ke PWM 8-bit (0–255)
  */
-export function infer(age: number, es: number, ek: number): FuzzyResult {
+export function infer(age: number, tempAct: number, humAct: number): FuzzyResult {
   // 1. Fuzzifikasi umur
-  const ageMF = fuzzifyAge(age);
+  const ageMF       = fuzzifyAge(age);
 
-  // 2. Tentukan fase dominan → pilih fungsi keanggotaan suhu yang sesuai
+  // 2. Fase dominan & setpoint
   const dominantAge = getDominantAge(ageMF);
+  const setpoint    = getSetpoint(dominantAge);
+
+  // 3–4. Hitung error
+  const es = setpoint.temp - tempAct;  // positif = aktual lebih DINGIN
+  const ek = setpoint.hum  - humAct;   // positif = aktual lebih KERING
+
+  // 5–6. Fuzzifikasi suhu & kelembaban
   const tempMF = dominantAge === 'BA'
     ? fuzzifyTempBA(es)
     : fuzzifyTempBL(es);
+  const humMF  = fuzzifyHum(ek);
 
-  // 3. Fuzzifikasi kelembaban
-  const humMF = fuzzifyHum(ek);
-
-  // 4. Inferensi + agregasi
+  // 7. Inferensi + agregasi
   const { vfd, dim, ruleWeights } = applyRules(ageMF, tempMF, humMF);
 
-  // 5. Defuzzifikasi (skala 0–100 %)
+  // 8. Defuzzifikasi (0–100%)
   const rawVfd = defuzzify(vfd);
   const rawDim = defuzzify(dim);
 
-  // 6. Konversi ke PWM 8-bit (0–255)
+  // 9. Konversi ke PWM 8-bit
   const vfdScore    = Math.round((rawVfd / 100) * 255);
   const dimmerScore = Math.round((rawDim / 100) * 255);
 
@@ -409,6 +426,8 @@ export function infer(age: number, es: number, ek: number): FuzzyResult {
     rawVfd,
     rawDim,
     dominantAge,
+    setpoint,
+    error: { es, ek },
     membership: { age: ageMF, temp: tempMF, hum: humMF },
     output: { vfd, dim },
     ruleWeights,
@@ -438,19 +457,19 @@ export const AGE_LABELS: Record<AgeKey, string> = {
 };
 
 export const TEMP_LABELS: Record<keyof TempFS, string> = {
-  NB: 'NB – Suhu Sangat Panas  (e_s sangat negatif)',
-  NK: 'NK – Suhu Agak Panas    (e_s sedikit negatif)',
-  Z:  'Z  – Suhu Ideal         (e_s ≈ 0)',
-  PK: 'PK – Suhu Agak Dingin   (e_s sedikit positif)',
-  PB: 'PB – Suhu Sangat Dingin (e_s sangat positif)',
+  NB: 'NB – Suhu Sangat Panas   (e_s sangat negatif)',
+  NK: 'NK – Suhu Agak Panas     (e_s sedikit negatif)',
+  Z:  'Z  – Suhu Ideal          (e_s ≈ 0)',
+  PK: 'PK – Suhu Agak Dingin    (e_s sedikit positif)',
+  PB: 'PB – Suhu Sangat Dingin  (e_s sangat positif)',
 };
 
 export const HUM_LABELS: Record<keyof HumFS, string> = {
-  NB: 'NB – Sangat Lembap  (e_k sangat negatif)',
-  NK: 'NK – Agak Lembap    (e_k sedikit negatif)',
-  Z:  'Z  – RH Ideal       (e_k ≈ 0)',
-  PK: 'PK – Agak Kering    (e_k sedikit positif)',
-  PB: 'PB – Sangat Kering  (e_k sangat positif)',
+  NB: 'NB – Sangat Lembap   (e_k sangat negatif)',
+  NK: 'NK – Agak Lembap     (e_k sedikit negatif)',
+  Z:  'Z  – RH Ideal        (e_k ≈ 0)',
+  PK: 'PK – Agak Kering     (e_k sedikit positif)',
+  PB: 'PB – Sangat Kering   (e_k sangat positif)',
 };
 
 export const ES_KEYS_ORDERED: EsKey[] = ['NB', 'NK', 'Z', 'PK', 'PB'];
