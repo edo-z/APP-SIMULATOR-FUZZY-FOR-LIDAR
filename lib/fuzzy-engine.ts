@@ -3,22 +3,27 @@
 //  Port dari fuzzy.h (Arduino) ke TypeScript (Next.js)
 //
 //  Input  : age     = umur ayam (hari, 0–50)
-//           tempAct = suhu aktual (°C)
-//           humAct  = kelembaban aktual (%)
+//           tempAct = suhu aktual sensor (°C)
+//           humAct  = kelembaban aktual sensor (%)
 //
-//  Setpoint per fase (dihitung otomatis di dalam engine):
-//  ┌──────┬───────────────┬────────────┐
-//  │ Fase │  Suhu (°C)    │  RH (%)    │
-//  ├──────┼───────────────┼────────────┤
-//  │ BA   │  31 – 34      │  60 – 65   │
-//  │ BL   │  30 – 31      │  60 – 65   │
-//  │ T    │  28 – 29      │  60 – 65   │
-//  │ PA   │  25 – 27      │  60 – 65   │
-//  │ PL   │  24 – 25      │  60 – 65   │
-//  └──────┴───────────────┴────────────┘
-//  Setpoint = titik tengah range masing-masing fase.
-//  e_s = T_setpoint − T_aktual  (range BA: ±2.0°C, BL–PL: ±1.0°C)
-//  e_k = H_setpoint − H_aktual  (range semua fase: ±2.5%)
+//  Setpoint per fase menggunakan DEAD BAND (range, bukan titik tengah):
+//  ┌──────┬─────────────────┬──────────────────┐
+//  │ Fase │  Suhu (°C)      │  RH (%)          │
+//  ├──────┼─────────────────┼──────────────────┤
+//  │ BA   │  31.0 – 34.0    │  60.0 – 65.0     │
+//  │ BL   │  30.0 – 31.0    │  60.0 – 65.0     │
+//  │ T    │  28.0 – 29.0    │  60.0 – 65.0     │
+//  │ PA   │  25.0 – 27.0    │  60.0 – 65.0     │
+//  │ PL   │  24.0 – 25.0    │  60.0 – 65.0     │
+//  └──────┴─────────────────┴──────────────────┘
+//
+//  Logika error (dead band):
+//    actual < min  →  e = min − actual  (positif = terlalu dingin/kering)
+//    actual > max  →  e = max − actual  (negatif = terlalu panas/lembap)
+//    min ≤ actual ≤ max  →  e = 0      (dalam range ideal, tidak ada error)
+//
+//  Range error suhu    : BA → ±2.0°C  |  BL–PL → ±1.0°C
+//  Range error kelembaban: semua fase → ±2.5%
 //
 //  Output : vfdScore    = PWM VFD / kipas   (0–255)
 //           dimmerScore = PWM AC Dimmer     (0–255)
@@ -39,9 +44,9 @@ export interface FuzzyResult {
   rawDim: number;
   /** Fase umur dominan (penentu setpoint & fungsi keanggotaan suhu) */
   dominantAge: AgeKey;
-  /** Setpoint yang digunakan berdasarkan fase dominan */
-  setpoint: { temp: number; hum: number };
-  /** Error yang dihitung engine: e_s = T_sp − T_aktual, e_k = H_sp − H_aktual */
+  /** Setpoint range yang digunakan berdasarkan fase dominan */
+  setpoint: Setpoint;
+  /** Error yang dihitung engine dengan logika dead band */
   error: { es: number; ek: number };
   /** Derajat keanggotaan input */
   membership: {
@@ -58,6 +63,13 @@ export interface FuzzyResult {
   ruleWeights: RuleWeight[];
 }
 
+export interface Setpoint {
+  tempMin: number;
+  tempMax: number;
+  humMin:  number;
+  humMax:  number;
+}
+
 export interface AgeFS {
   /** Brooding Awal        0–10 hari */
   BA: number;
@@ -72,28 +84,28 @@ export interface AgeFS {
 }
 
 export interface TempFS {
-  /** Negatif Besar — suhu aktual JAUH LEBIH PANAS dari setpoint */
+  /** Negatif Besar — suhu aktual JAUH LEBIH PANAS dari batas atas setpoint */
   NB: number;
-  /** Negatif Kecil — suhu aktual sedikit panas */
+  /** Negatif Kecil — suhu aktual sedikit di atas batas atas setpoint */
   NK: number;
-  /** Zero — suhu ideal */
+  /** Zero — suhu aktual dalam range ideal (dead band) */
   Z: number;
-  /** Positif Kecil — suhu aktual sedikit dingin */
+  /** Positif Kecil — suhu aktual sedikit di bawah batas bawah setpoint */
   PK: number;
-  /** Positif Besar — suhu aktual JAUH LEBIH DINGIN dari setpoint */
+  /** Positif Besar — suhu aktual JAUH di bawah batas bawah setpoint */
   PB: number;
 }
 
 export interface HumFS {
-  /** Negatif Besar — kelembaban aktual JAUH LEBIH LEMBAP dari setpoint */
+  /** Negatif Besar — RH aktual JAUH di atas batas atas setpoint */
   NB: number;
-  /** Negatif Kecil — sedikit lembap */
+  /** Negatif Kecil — RH aktual sedikit di atas batas atas setpoint */
   NK: number;
-  /** Zero — kelembaban ideal */
+  /** Zero — RH aktual dalam range ideal (dead band) */
   Z: number;
-  /** Positif Kecil — sedikit kering */
+  /** Positif Kecil — RH aktual sedikit di bawah batas bawah setpoint */
   PK: number;
-  /** Positif Besar — kelembaban aktual JAUH LEBIH KERING dari setpoint */
+  /** Positif Besar — RH aktual JAUH di bawah batas bawah setpoint */
   PB: number;
 }
 
@@ -130,29 +142,45 @@ export interface RuleWeight {
 }
 
 // -------------------------------------------------------------
-//  BAGIAN 1: SETPOINT PER FASE UMUR
+//  BAGIAN 1: SETPOINT PER FASE UMUR (DEAD BAND)
 // -------------------------------------------------------------
 
 /**
- * Tabel setpoint suhu dan kelembaban per fase umur.
- * Nilai = titik tengah range masing-masing fase:
- *   BA  → Suhu (31+34)/2 = 32.5°C,  RH (60+65)/2 = 62.5%
- *   BL  → Suhu (30+31)/2 = 30.5°C,  RH 62.5%
- *   T   → Suhu (28+29)/2 = 28.5°C,  RH 62.5%
- *   PA  → Suhu (25+27)/2 = 26.0°C,  RH 62.5%
- *   PL  → Suhu (24+25)/2 = 24.5°C,  RH 62.5%
+ * Tabel setpoint range suhu dan kelembaban per fase umur.
+ * Error = 0 selama nilai aktual berada di dalam range [min, max].
+ * Error dihitung hanya saat nilai aktual keluar dari range.
+ *
+ *   actual < min  →  e = min − actual  (+, terlalu dingin/kering)
+ *   actual > max  →  e = max − actual  (−, terlalu panas/lembap)
+ *   min ≤ actual ≤ max  →  e = 0
  */
-export const SETPOINT_TABLE: Record<AgeKey, { temp: number; hum: number }> = {
-  BA: { temp: 32.5, hum: 62.5 },
-  BL: { temp: 30.5, hum: 62.5 },
-  T:  { temp: 28.5, hum: 62.5 },
-  PA: { temp: 26.0, hum: 62.5 },
-  PL: { temp: 24.5, hum: 62.5 },
+export const SETPOINT_TABLE: Record<AgeKey, Setpoint> = {
+  BA: { tempMin: 31.0, tempMax: 34.0, humMin: 60.0, humMax: 65.0 },
+  BL: { tempMin: 30.0, tempMax: 31.0, humMin: 60.0, humMax: 65.0 },
+  T:  { tempMin: 28.0, tempMax: 29.0, humMin: 60.0, humMax: 65.0 },
+  PA: { tempMin: 25.0, tempMax: 27.0, humMin: 60.0, humMax: 65.0 },
+  PL: { tempMin: 24.0, tempMax: 25.0, humMin: 60.0, humMax: 65.0 },
 };
 
-/** Kembalikan setpoint berdasarkan fase umur dominan (untuk UI). */
-export function getSetpoint(dominantAge: AgeKey): { temp: number; hum: number } {
+/** Kembalikan setpoint range berdasarkan fase umur dominan (untuk UI). */
+export function getSetpoint(dominantAge: AgeKey): Setpoint {
   return SETPOINT_TABLE[dominantAge];
+}
+
+/**
+ * Hitung error dengan logika dead band.
+ * Jika nilai aktual berada di dalam range [min, max], error = 0.
+ * Jika di bawah min, error positif (perlu pemanasan/pembasahan).
+ * Jika di atas max, error negatif (perlu pendinginan/pengeringan).
+ *
+ * @param actual - Nilai aktual sensor
+ * @param min    - Batas bawah setpoint
+ * @param max    - Batas atas setpoint
+ */
+export function calcError(actual: number, min: number, max: number): number {
+  if (actual < min) return min - actual;   // positif: aktual < batas bawah
+  if (actual > max) return max - actual;   // negatif: aktual > batas atas
+  return 0;                                // dalam range: tidak ada error
 }
 
 // -------------------------------------------------------------
@@ -207,9 +235,11 @@ export function fuzzifyAge(age: number): AgeFS {
 }
 
 /**
- * Fuzzifikasi Error Suhu — FASE BA (0–10 hari), range ±2.0°C.
- * e_s negatif = suhu aktual LEBIH PANAS dari setpoint.
- * e_s positif = suhu aktual LEBIH DINGIN dari setpoint.
+ * Fuzzifikasi Error Suhu — FASE BA (0–10 hari).
+ * Range error: ±2.0°C (jarak maksimum keluar dari range BA: 31–34°C).
+ * e_s = 0     → suhu dalam range ideal (dead band aktif)
+ * e_s negatif → suhu aktual LEBIH PANAS dari batas atas setpoint
+ * e_s positif → suhu aktual LEBIH DINGIN dari batas bawah setpoint
  */
 export function fuzzifyTempBA(es: number): TempFS {
   return {
@@ -222,7 +252,8 @@ export function fuzzifyTempBA(es: number): TempFS {
 }
 
 /**
- * Fuzzifikasi Error Suhu — FASE BL hingga PL (>10 hari), range ±1.0°C.
+ * Fuzzifikasi Error Suhu — FASE BL hingga PL (>10 hari).
+ * Range error: ±1.0°C (range setpoint lebih sempit di fase lanjut).
  */
 export function fuzzifyTempBL(es: number): TempFS {
   return {
@@ -235,9 +266,11 @@ export function fuzzifyTempBL(es: number): TempFS {
 }
 
 /**
- * Fuzzifikasi Error Kelembaban (semua fase), range ±2.5%.
- * e_k negatif = kelembaban aktual LEBIH LEMBAP dari setpoint.
- * e_k positif = kelembaban aktual LEBIH KERING dari setpoint.
+ * Fuzzifikasi Error Kelembaban (semua fase).
+ * Range error: ±2.5% (jarak maksimum keluar dari range RH: 60–65%).
+ * e_k = 0     → RH dalam range ideal (dead band aktif)
+ * e_k negatif → RH aktual LEBIH LEMBAP dari batas atas setpoint
+ * e_k positif → RH aktual LEBIH KERING dari batas bawah setpoint
  */
 export function fuzzifyHum(ek: number): HumFS {
   return {
@@ -252,16 +285,18 @@ export function fuzzifyHum(ek: number): HumFS {
 // -------------------------------------------------------------
 //  BAGIAN 4: RULE BASE
 //  25 rules — 5 e_s × 5 e_k
-//  Output sama untuk semua fase umur [BA,BL,T,PA,PL].
+//  Output seragam untuk semua fase umur [BA,BL,T,PA,PL].
 //  Fase umur berperan sebagai MODERATOR BOBOT via AND.
 //
 //  Kode : S=SR  R=R  N=N  T=T  X=ST
 //
 //  Logika:
-//  · Dimmer ↑  saat suhu aktual PANAS  (e_s negatif: NB/NK)
-//  · Dimmer ↓  saat suhu aktual DINGIN (e_s positif: PK/PB)
-//  · VFD ↑     saat RH KERING (e_k positif: PK/PB) / suhu sangat panas
-//  · VFD ↓     saat kondisi ideal / RH lembap + suhu dingin
+//  · e_s = Z  → suhu dalam dead band → Dimmer minimal
+//  · e_s = NB/NK → suhu terlalu PANAS → Dimmer tinggi (kurangi panas)
+//  · e_s = PK/PB → suhu terlalu DINGIN → Dimmer rendah (tidak perlu panas)
+//  · e_k = Z  → RH dalam dead band → VFD sesuai kondisi suhu
+//  · e_k = NB/NK → RH terlalu LEMBAP → VFD tinggi (sirkulasi)
+//  · e_k = PK/PB → RH terlalu KERING → VFD sangat tinggi (distribusi uap)
 // -------------------------------------------------------------
 
 export const AGE_KEYS: AgeKey[] = ['BA', 'BL', 'T', 'PA', 'PL'];
@@ -271,31 +306,31 @@ const CHAR_TO_KEY: Record<RuleCode, OutputKey> = {
 };
 
 const RULE_TABLE: [EsKey, EkKey, RuleCode[], RuleCode[]][] = [
-  // ── e_s = NB (suhu aktual SANGAT PANAS) ──
+  // ── e_s = NB (suhu SANGAT PANAS, jauh di atas batas atas) ──
   ['NB', 'NB', ['N','N','N','N','N'], ['X','X','X','X','X']],
   ['NB', 'NK', ['R','R','R','R','R'], ['X','X','X','X','X']],
   ['NB', 'Z',  ['R','R','R','R','R'], ['X','X','X','X','X']],
   ['NB', 'PK', ['N','N','N','N','N'], ['X','X','X','X','X']],
   ['NB', 'PB', ['T','T','T','T','T'], ['X','X','X','X','X']],
-  // ── e_s = NK (suhu aktual AGAK PANAS) ──
+  // ── e_s = NK (suhu AGAK PANAS, sedikit di atas batas atas) ──
   ['NK', 'NB', ['N','N','N','N','N'], ['T','T','T','T','T']],
   ['NK', 'NK', ['R','R','R','R','R'], ['T','T','T','T','T']],
   ['NK', 'Z',  ['R','R','R','R','R'], ['T','T','T','T','T']],
   ['NK', 'PK', ['N','N','N','N','N'], ['T','T','T','T','T']],
   ['NK', 'PB', ['T','T','T','T','T'], ['T','T','T','T','T']],
-  // ── e_s = Z  (suhu IDEAL) ──
+  // ── e_s = Z (suhu DALAM RANGE IDEAL — dead band aktif) ──
   ['Z',  'NB', ['N','N','N','N','N'], ['S','S','S','S','S']],
   ['Z',  'NK', ['S','S','S','S','S'], ['R','R','R','R','R']],
   ['Z',  'Z',  ['S','S','S','S','S'], ['S','S','S','S','S']],
   ['Z',  'PK', ['T','T','T','T','T'], ['S','S','S','S','S']],
   ['Z',  'PB', ['X','X','X','X','X'], ['S','S','S','S','S']],
-  // ── e_s = PK (suhu aktual AGAK DINGIN) ──
+  // ── e_s = PK (suhu AGAK DINGIN, sedikit di bawah batas bawah) ──
   ['PK', 'NB', ['N','N','N','N','N'], ['R','R','R','R','R']],
   ['PK', 'NK', ['T','T','T','T','T'], ['R','R','R','R','R']],
   ['PK', 'Z',  ['T','T','T','T','T'], ['R','R','R','R','R']],
   ['PK', 'PK', ['T','T','T','T','T'], ['R','R','R','R','R']],
   ['PK', 'PB', ['X','X','X','X','X'], ['R','R','R','R','R']],
-  // ── e_s = PB (suhu aktual SANGAT DINGIN) ──
+  // ── e_s = PB (suhu SANGAT DINGIN, jauh di bawah batas bawah) ──
   ['PB', 'NB', ['N','N','N','N','N'], ['S','S','S','S','S']],
   ['PB', 'NK', ['T','T','T','T','T'], ['S','S','S','S','S']],
   ['PB', 'Z',  ['T','T','T','T','T'], ['S','S','S','S','S']],
@@ -382,26 +417,26 @@ function getDominantAge(ageMF: AgeFS): AgeKey {
  *
  * Alur internal engine:
  *  1. Fuzzifikasi umur → tentukan fase dominan
- *  2. Ambil setpoint dari SETPOINT_TABLE berdasarkan fase dominan
- *  3. Hitung e_s = T_setpoint − T_aktual
- *  4. Hitung e_k = H_setpoint − H_aktual
+ *  2. Ambil setpoint RANGE dari SETPOINT_TABLE
+ *  3. Hitung e_s dengan dead band: calcError(tempAct, tempMin, tempMax)
+ *  4. Hitung e_k dengan dead band: calcError(humAct,  humMin,  humMax)
  *  5. Pilih fungsi keanggotaan suhu (BA: ±2°C / BL–PL: ±1°C)
  *  6. Fuzzifikasi e_s dan e_k
  *  7. Inferensi Mamdani (AND=min, OR=max)
- *  8. Defuzzifikasi weighted average → skala 0–100%
+ *  8. Defuzzifikasi weighted average → 0–100%
  *  9. Konversi ke PWM 8-bit (0–255)
  */
 export function infer(age: number, tempAct: number, humAct: number): FuzzyResult {
   // 1. Fuzzifikasi umur
   const ageMF       = fuzzifyAge(age);
 
-  // 2. Fase dominan & setpoint
+  // 2. Fase dominan & setpoint range
   const dominantAge = getDominantAge(ageMF);
   const setpoint    = getSetpoint(dominantAge);
 
-  // 3–4. Hitung error
-  const es = setpoint.temp - tempAct;  // positif = aktual lebih DINGIN
-  const ek = setpoint.hum  - humAct;   // positif = aktual lebih KERING
+  // 3–4. Hitung error dengan dead band
+  const es = calcError(tempAct, setpoint.tempMin, setpoint.tempMax);
+  const ek = calcError(humAct,  setpoint.humMin,  setpoint.humMax);
 
   // 5–6. Fuzzifikasi suhu & kelembaban
   const tempMF = dominantAge === 'BA'
@@ -457,20 +492,20 @@ export const AGE_LABELS: Record<AgeKey, string> = {
 };
 
 export const TEMP_LABELS: Record<keyof TempFS, string> = {
-  NB: 'NB – Suhu Sangat Panas   (e_s sangat negatif)',
-  NK: 'NK – Suhu Agak Panas     (e_s sedikit negatif)',
-  Z:  'Z  – Suhu Ideal          (e_s ≈ 0)',
-  PK: 'PK – Suhu Agak Dingin    (e_s sedikit positif)',
-  PB: 'PB – Suhu Sangat Dingin  (e_s sangat positif)',
+  NB: 'NB – Suhu Sangat Panas   (jauh di atas batas atas setpoint)',
+  NK: 'NK – Suhu Agak Panas     (sedikit di atas batas atas setpoint)',
+  Z:  'Z  – Suhu Ideal          (dalam range dead band)',
+  PK: 'PK – Suhu Agak Dingin    (sedikit di bawah batas bawah setpoint)',
+  PB: 'PB – Suhu Sangat Dingin  (jauh di bawah batas bawah setpoint)',
 };
 
 export const HUM_LABELS: Record<keyof HumFS, string> = {
-  NB: 'NB – Sangat Lembap   (e_k sangat negatif)',
-  NK: 'NK – Agak Lembap     (e_k sedikit negatif)',
-  Z:  'Z  – RH Ideal        (e_k ≈ 0)',
-  PK: 'PK – Agak Kering     (e_k sedikit positif)',
-  PB: 'PB – Sangat Kering   (e_k sangat positif)',
+  NB: 'NB – Sangat Lembap   (jauh di atas batas atas setpoint)',
+  NK: 'NK – Agak Lembap     (sedikit di atas batas atas setpoint)',
+  Z:  'Z  – RH Ideal        (dalam range dead band)',
+  PK: 'PK – Agak Kering     (sedikit di bawah batas bawah setpoint)',
+  PB: 'PB – Sangat Kering   (jauh di bawah batas bawah setpoint)',
 };
 
 export const ES_KEYS_ORDERED: EsKey[] = ['NB', 'NK', 'Z', 'PK', 'PB'];
-export const EK_KEYS_ORDERED: EkKey[] = ['NB', 'NK', 'Z', 'PK', 'PB'];``
+export const EK_KEYS_ORDERED: EkKey[] = ['NB', 'NK', 'Z', 'PK', 'PB'];
