@@ -53,28 +53,35 @@ Buka `http://localhost:3000` — simulator langsung berjalan.
 ## Data Flow
 
 ```
-User geser slider (age, es, ek)
+User geser slider (age, tempAct, humAct)
         ↓
 FuzzySimulator.tsx
-  └── useMemo → infer(age, es, ek)   [dari lib/fuzzy-engine.ts]
+  └── useMemo → infer(age, tempAct, humAct)   [lib/fuzzy-engine.ts]
         ↓
-  Fuzzifikasi
-    fuzzifyAge(age)   → AgeFS  {BA, BL, T, PA, PL}
-    fuzzifyTemp(es)   → TempFS {NB, NK, Z, PK, PB}
-    fuzzifyHum(ek)    → HumFS  {NB, NK, Z, PK, PB}
+  [Engine internal]
+  1. fuzzifyAge(age)           → AgeFS  {BA, BL, T, PA, PL}
+  2. getDominantAge(ageMF)     → AgeKey (fase dominan)
+  3. SETPOINT_TABLE[dominant]  → { temp, hum }
+  4. es = setpoint.temp - tempAct
+     ek = setpoint.hum  - humAct
+  5. dominantAge === 'BA'
+       ? fuzzifyTempBA(es)     → TempFS (range ±2.0°C)
+       : fuzzifyTempBL(es)     → TempFS (range ±1.0°C)
+  6. fuzzifyHum(ek)            → HumFS  (range ±2.5%)
         ↓
-  Rule Evaluation (25 rules)
-    AND = min(t[esKey], h[ekKey])
-    Bobot umur = min(w, a[ageKey])
+  Rule Evaluation (25 rules × 5 fase umur)
+    w         = min(t[esKey], h[ekKey])
+    ageWeight = min(w, a[ageKey])
         ↓
   Agregasi MAX → OutputFS {SR, R, N, T, ST}
         ↓
-  Defuzzifikasi (centroid weighted average)
+  Defuzzifikasi (weighted average, centroid SR=10 R=30 N=50 T=70 ST=90)
     rawVfd, rawDim  ∈ [0, 100]
         ↓
-  Konversi PWM: (raw / 100) × 255
+  Konversi PWM: Math.round((raw / 100) × 255)
         ↓
-FuzzyResult → props ke semua komponen UI
+FuzzyResult → { vfdScore, dimmerScore, dominantAge, setpoint, error, ... }
+              → props ke semua komponen UI
 ```
 
 ---
@@ -82,24 +89,20 @@ FuzzyResult → props ke semua komponen UI
 ## Kustomisasi Rule Base
 
 Buka `lib/fuzzy-engine.ts`, cari `RULE_TABLE`.
-Setiap baris adalah satu kombinasi `[e_s, e_k]`:
 
 ```ts
-// Format:
-// [esKey, ekKey, vfd_per_umur[BA,BL,T,PA,PL], dim_per_umur[BA,BL,T,PA,PL]]
+// Format: [esKey, ekKey, vfd_codes[BA,BL,T,PA,PL], dim_codes[BA,BL,T,PA,PL]]
 // Kode: S=SR, R=Rendah, N=Normal, T=Tinggi, X=ST
-
-['NB', 'NB', ['N','N','N','N','N'], ['X','X','X','X','X']],
-//  ↑ suhu sangat panas, kelembaban sangat lembap
-//  VFD Normal untuk semua fase umur
-//  Dimmer Sangat Tinggi untuk semua fase umur
 ```
 
-Jika rule berbeda per fase umur, ganti kode di array:
+**Output rule SERAGAM untuk semua fase umur.** Fase umur hanya memoderasi BOBOT via AND, bukan mengubah output.
+
 ```ts
-['PK', 'PB', ['T','X','X','X','X'], ['R','R','R','S','S']],
-//            ↑ BA=T  BL=X  T=X  PA=X  PL=X
-//                         Dimmer: BA=R  ...  PL=S
+['NB', 'NB', ['N','N','N','N','N'], ['X','X','X','X','X']],
+//  ↑ suhu sangat panas + RH sangat lembap
+//  VFD = Normal untuk semua fase
+//  Dimmer = Sangat Tinggi untuk semua fase
+//  Bobot akhir tiap fase = min(w, µ_age[fase])
 ```
 
 ---
@@ -134,17 +137,26 @@ Lalu tambah kode di `AGE_KEYS`, `AGE_LABELS`, dan update RULE_TABLE.
 
 ## Menggunakan Output di Hardware
 
-Nilai `vfdScore` dan `dimmerScore` langsung siap dikirim ke hardware:
+Kirim nilai aktual sensor ke engine, bukan error:
 
 ```ts
-const result = infer(age, es, ek);
+// BARU — kirim nilai aktual sensor, bukan error
+const result = infer(age, tempAktual, humAktual);
 
-// Kirim via API route ke MQTT / Serial
+// result.setpoint → setpoint yang digunakan
+// result.error    → { es, ek } yang dihitung engine
+// result.dominantAge → fase umur aktif
+
 await fetch('/api/control', {
   method: 'POST',
   body: JSON.stringify({
-    pwm_vfd:    Math.round(result.vfdScore),    // 0–255
-    pwm_dimmer: Math.round(result.dimmerScore), // 0–255
+    pwm_vfd:       result.vfdScore,      // 0–255
+    pwm_dimmer:    result.dimmerScore,   // 0–255
+    dominant_age:  result.dominantAge,
+    setpoint_temp: result.setpoint.temp,
+    setpoint_hum: result.setpoint.hum,
+    error_suhu:    result.error.es,
+    error_rh:      result.error.ek,
   }),
 });
 ```

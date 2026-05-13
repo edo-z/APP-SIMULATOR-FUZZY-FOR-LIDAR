@@ -8,7 +8,7 @@ import MembershipPanel from './MembershipPanel';
 import OutputPanel from './OutputPanel';
 import RuleTable from './RuleTable';
 
-const AGE_PHASE_LABELS = {
+const AGE_PHASE_LABELS: Record<string, string> = {
   BA: 'Brooding Awal',
   BL: 'Brooding Lanjutan',
   T:  'Transisi',
@@ -66,25 +66,22 @@ function SliderInput({
 
 export default function FuzzySimulator() {
   const [age, setAge] = useState(7);
-  const [es, setEs]   = useState(0);
-  const [ek, setEk]   = useState(0);
+  const [tempAct, setTempAct] = useState(32.5);
+  const [humAct, setHumAct] = useState(62.5);
 
-  const result = useMemo(() => infer(age, es, ek), [age, es, ek]);
+  const result = useMemo(() => infer(age, tempAct, humAct), [age, tempAct, humAct]);
 
   const pwmVfd = Math.round(result.vfdScore);
   const pwmDim = Math.round(result.dimmerScore);
 
-  // Determine dominant age phase
-  const dominantAge = AGE_KEYS.reduce<{ key: string; val: number }>(
-    (best, k) =>
-      result.membership.age[k] > best.val ? { key: k, val: result.membership.age[k] } : best,
-    { key: 'BA', val: 0 },
-  );
+  const dominantAge = result.dominantAge;
+  const setpoint = result.setpoint;
+  const error = result.error;
 
   const esDesc =
-    es < -2 ? 'Terlalu panas' : es > 2 ? 'Terlalu dingin' : 'Suhu ideal';
+    error.es < -0.5 ? 'Terlalu dingin' : error.es > 0.5 ? 'Terlalu panas' : 'Suhu ideal';
   const ekDesc =
-    ek < -6 ? 'Terlalu lembap' : ek > 6 ? 'Terlalu kering' : 'Kelembaban ideal';
+    error.ek < -3 ? 'Terlalu lembap' : error.ek > 3 ? 'Terlalu kering' : 'Kelembaban ideal';
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
@@ -94,7 +91,7 @@ export default function FuzzySimulator() {
           Fuzzy Mamdani — Kandang Ayam Broiler
         </h1>
         <p className="text-sm text-neutral-500 mt-1">
-          Kendali VFD kipas &amp; AC Dimmer pemanas berdasarkan umur, error suhu, dan error kelembaban
+          Kendali VFD kipas &amp; AC Dimmer pemanas — input: umur, suhu aktual, RH aktual
         </p>
       </div>
 
@@ -145,31 +142,37 @@ export default function FuzzySimulator() {
           <hr className="border-neutral-200 dark:border-neutral-700 mb-4" />
 
           <SliderInput
-            label="Error Suhu (e_s)"
-            sublabel="e_s = T_setpoint − T_aktual · Negatif = terlalu panas"
-            id="sl-es"
-            min={-10} max={10} step={0.5}
-            value={es} unit="°C"
-            onChange={setEs}
+            label="Suhu Aktual"
+            sublabel="Sensor suhu aktual (°C)"
+            id="sl-temp"
+            min={20} max={40} step={0.1}
+            value={tempAct} unit="°C"
+            onChange={setTempAct}
           />
 
           <SliderInput
-            label="Error Kelembaban (e_k)"
-            sublabel="e_k = H_setpoint − H_aktual · Negatif = terlalu lembap"
-            id="sl-ek"
-            min={-30} max={30} step={1}
-            value={ek} unit="%"
-            onChange={setEk}
+            label="Kelembaban Aktual"
+            sublabel="Sensor RH aktual (%)"
+            id="sl-hum"
+            min={40} max={80} step={0.5}
+            value={humAct} unit="%"
+            onChange={setHumAct}
           />
 
           {/* Status */}
-          <div className="mt-2 flex items-center gap-2 bg-neutral-50 dark:bg-neutral-800 rounded-lg px-3 py-2">
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 bg-neutral-50 dark:bg-neutral-800 rounded-lg px-3 py-2">
             <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
             <span className="text-[11px] text-neutral-500">
               Fase: <strong className="text-neutral-700 dark:text-neutral-300">
-                {AGE_PHASE_LABELS[dominantAge.key as keyof typeof AGE_PHASE_LABELS]}
+                {AGE_PHASE_LABELS[dominantAge]}
               </strong>
               &nbsp;·&nbsp;{esDesc}&nbsp;·&nbsp;{ekDesc}
+            </span>
+            <span className="text-[10px] text-neutral-400">
+              Setpoint: {setpoint.temp.toFixed(1)}°C / {setpoint.hum.toFixed(1)}%
+            </span>
+            <span className="text-[10px] text-neutral-400">
+              Error: e_s={error.es.toFixed(2)}, e_k={error.ek.toFixed(2)}
             </span>
           </div>
         </div>
@@ -179,6 +182,9 @@ export default function FuzzySimulator() {
           age={result.membership.age}
           temp={result.membership.temp}
           hum={result.membership.hum}
+          dominantAge={dominantAge}
+          setpoint={setpoint}
+          error={error}
         />
       </div>
 

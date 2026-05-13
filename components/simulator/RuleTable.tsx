@@ -1,6 +1,6 @@
 // components/simulator/RuleTable.tsx
-import type { RuleWeight, AgeKey } from '@/lib/fuzzy-engine';
-import { AGE_KEYS, ES_KEYS_ORDERED, EK_KEYS_ORDERED } from '@/lib/fuzzy-engine';
+import type { RuleWeight } from '@/lib/fuzzy-engine';
+import { ES_KEYS_ORDERED, EK_KEYS_ORDERED } from '@/lib/fuzzy-engine';
 
 interface RuleTableProps {
   ruleWeights: RuleWeight[];
@@ -20,7 +20,7 @@ export default function RuleTable({ ruleWeights }: RuleTableProps) {
       </p>
 
       {/* Legend */}
-      <div className="flex gap-4 mb-3 text-[10px] text-neutral-400">
+      <div className="flex flex-wrap gap-3 mb-3 text-[10px] text-neutral-400">
         <span className="flex items-center gap-1">
           <span className="inline-block w-3 h-3 rounded-sm bg-blue-100 dark:bg-blue-900/40" />
           VFD aktif
@@ -29,7 +29,10 @@ export default function RuleTable({ ruleWeights }: RuleTableProps) {
           <span className="inline-block w-3 h-3 rounded-sm bg-amber-100 dark:bg-amber-900/40" />
           Dimmer aktif
         </span>
-        <span className="text-neutral-300 dark:text-neutral-600">nilai = bobot AND (e_s × e_k)</span>
+        <span className="text-neutral-300 dark:text-neutral-600">nilai = bobot AND</span>
+        <span className="text-neutral-400 italic">
+          Umum moderator bobot, bukan mengubah output
+        </span>
       </div>
 
       <div className="overflow-x-auto">
@@ -58,44 +61,39 @@ export default function RuleTable({ ruleWeights }: RuleTableProps) {
                 {EK_KEYS_ORDERED.map((ek) => {
                   const rule = lookup.get(`${es}|${ek}`);
                   const w = rule?.w ?? 0;
-                  const isActive = w > 0.001;
-
-                  // Check per-age contribution
-                  const vfdActive = isActive && AGE_KEYS.some((_, i) => (rule?.ageWeights[i] ?? 0) > 0.001);
-                  const dimActive = vfdActive;
+                  const isActive = w > 0;
+                  const intensity = Math.min(w, 1);
 
                   return (
                     <td key={ek} className="px-1 py-0.5">
                       <div
-                        className={`rounded px-1 py-0.5 text-center transition-colors ${
-                          vfdActive
-                            ? 'bg-blue-50 dark:bg-blue-900/30 ring-1 ring-blue-200 dark:ring-blue-800'
-                            : 'bg-neutral-50 dark:bg-neutral-800'
-                        }`}
+                        className="rounded px-1 py-0.5 text-center transition-colors"
+                        style={{
+                          backgroundColor: isActive
+                            ? `rgba(59, 130, 246, ${0.1 + intensity * 0.2})`
+                            : undefined,
+                        }}
                       >
-                        {/* VFD output code */}
                         <div
                           className={`text-[10px] font-medium ${
-                            vfdActive
+                            isActive
                               ? 'text-blue-700 dark:text-blue-300'
                               : 'text-neutral-400'
                           }`}
                         >
                           V: {rule?.vCodes[0] ?? '—'}
                         </div>
-                        {/* Dimmer output code */}
                         <div
                           className={`text-[10px] font-medium ${
-                            dimActive
+                            isActive
                               ? 'text-amber-700 dark:text-amber-300'
                               : 'text-neutral-400'
                           }`}
                         >
                           D: {rule?.dCodes[0] ?? '—'}
                         </div>
-                        {/* Weight */}
                         <div className="text-[9px] text-neutral-400 mt-0.5">
-                          {w.toFixed(2)}
+                          w={w.toFixed(2)}
                         </div>
                       </div>
                     </td>
@@ -109,7 +107,7 @@ export default function RuleTable({ ruleWeights }: RuleTableProps) {
 
       <p className="text-[10px] text-neutral-400 mt-3">
         S=SR · R=Rendah · N=Normal · T=Tinggi · X=ST &nbsp;|&nbsp;
-        Output ditampilkan untuk himpunan umur BA (semua umur menghasilkan kode yang sama di rule ini)
+        Output SERAGAM untuk semua fase umur — umur berperan sebagai moderator bobot (AND), bukan mengubah output rule
       </p>
     </div>
   );

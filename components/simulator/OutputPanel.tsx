@@ -45,11 +45,12 @@ function OutputSection({
         />
       ))}
       <div className="flex items-baseline gap-2 mt-3">
-        <span className="text-[11px] text-neutral-400">Centroid:</span>
-        <span className={`text-lg font-medium ${accentClass}`}>{raw.toFixed(1)}</span>
+        <span className="text-[11px] text-neutral-400">Raw:</span>
+        <span className={`text-lg font-medium ${accentClass}`}>{raw.toFixed(1)}%</span>
         <span className="text-[11px] text-neutral-400">→ PWM</span>
         <span className={`text-lg font-medium ${accentClass}`}>{pwm}</span>
-        <span className="text-[11px] text-neutral-400">/ 255</span>
+        <span className="text-[10px] text-neutral-400">/ 255</span>
+        <span className="text-[9px] text-neutral-300">PWM = (raw% / 100) × 255</span>
       </div>
     </div>
   );
